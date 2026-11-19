@@ -66,8 +66,9 @@ Ingest -> log -> engine -> store <- scheduler
 
 - **Event-driven detection** with one durable timer per cart, re-armed when it
   fires, so timer writes scale with carts and not with events.
-- **Cancellation by generation.** Every shopper event bumps the cart's
-  generation; older timers and reminders become no-ops. Nothing is deleted.
+- **Cancellation by generation.** Every applied cart event bumps the cart's
+  generation; older timers and reminders become no-ops. Conflicting-user
+  events are recorded and ignored. Nothing is deleted.
 - **One transactional store**, so a state change commits together with the
   timers and outbox rows it produces.
 - **Idempotent at every hop:** event id into state, `cartId:generation:offset`
@@ -81,9 +82,9 @@ Ingest -> log -> engine -> store <- scheduler
 |---|---|---|
 | 1. Success and guardrail metrics, control group | [§3](docs/DESIGN.md#3-success-and-guardrail-metrics-requirement-1) | `TestHoldoutIsRecordedButNotSent`, `TestInHoldoutSplit` |
 | 2. Detection: event-driven or batch | [§5](docs/DESIGN.md#5-detection-event-driven-not-batch-requirement-2) | `TestHappyPathThreeReminders`, `TestEditResetsTheClock`, `TestEditResetsClockWithOneTimerPerCart`, `TestTransitions` |
-| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestReminderForAnOldGenerationIsANoOp`, `TestPreSendChecks`, `TestClearCancelsThenNewEditStartsNewCycle`, `TestResumeCancelsAndReArmsThenNewCycle` |
+| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestCartChangeDuringTheOrderCheckCancelsTheSend`, `TestReminderForAnOldGenerationIsANoOp`, `TestPreSendChecks`, `TestClearCancelsThenNewEditStartsNewCycle`, `TestResumeCancelsAndReArmsThenNewCycle` |
 | 4. Idempotency, no duplicate reminders | [§7](docs/DESIGN.md#7-idempotency-and-delivery-requirement-4) | `TestDuplicateEventDeliveryHasNoEffect`, `TestRestartAndLogReplaySendNothingTwice`, `TestDuplicateTimerFiringEnqueuesOnce`, `TestLostAckIsRedeliveredAndDroppedByKey` |
-| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay`, `TestAttemptCapDeadLetters`, `TestOrderServiceDownFailsClosed`, `TestRetriesRideOutAShortOutage`, `TestRetriesStopAtTheStalenessBound`, `TestFailedTimerIsRedelivered`, `TestRestartedSchedulerResumesFromStore`, `TestLateReplayIsSuppressedNotSent` |
+| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay`, `TestAttemptCapDeadLetters`, `TestOrderServiceDownFailsClosed`, `TestOrderCheckFailingAfterTheBoundSuppressesNotDeadLetters`, `TestSlowOrderCheckCannotPushASendPastTheStalenessBound`, `TestRetriesRideOutAShortOutage`, `TestRetriesStopAtTheStalenessBound`, `TestFailedTimerIsRedelivered`, `TestRestartedSchedulerResumesFromStore`, `TestLateReplayIsSuppressedNotSent` |
 
 End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
 
@@ -105,5 +106,8 @@ End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
   implemented.
 - **Not built:** guest merge, frequency cap, quiet hours, message variants.
   Each is discussed in DESIGN §9.
-- CI is defined in `.github/workflows/ci.yml` but has not run; this repository
-  has no remote yet.
+- **Assignment across guest login is not sticky.** The code switches from
+  session id to user id; production should persist assignment against a stable
+  first-party identity if treatment must survive login (DESIGN §9).
+- CI (`.github/workflows/ci.yml`: lint with staticcheck, then race tests) runs
+  on GitHub for every push. It does not run the demo or the benchmark.

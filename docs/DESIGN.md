@@ -19,9 +19,9 @@ Four decisions carry the design:
 
 1. **One transactional store** for cart state, timers, outbox and dedupe keys,
    so a state change and its side effects commit together or not at all.
-2. **Cancellation by generation, not deletion.** Every shopper event increments
-   the cart's generation. Timers and reminders carry the generation they were
-   created under and are ignored once it has moved on. Nothing is ever hunted
+2. **Cancellation by generation, not deletion.** Every applied cart event
+   increments the cart's generation. Timers and reminders carry the generation
+   they were created under and are ignored once it changes. Nothing is hunted
    down and deleted.
 3. **Idempotency at every hop**, because every hop delivers at least once:
    event id into state, a deterministic key `cartId:generation:offsetIndex`
@@ -158,6 +158,7 @@ sequenceDiagram
   R->>S: read pending row
   R->>O: purchased?
   O-->>R: no
+  R->>S: recheck generation, status and staleness
   R->>N: send, key "cart:2:0"
   R->>S: tx: row SENT
   L->>E: OrderPlaced (gen 3)
@@ -224,12 +225,11 @@ in time than the last:
    the outbox, for instance during retry backoff.
 3. **Before send, authoritative (relay).** The relay asks the order service
    whether the cart was purchased. This catches the purchase whose event is
-   still in flight. If the order service cannot answer, the relay does not
-   send: it retries later (fail closed). When the call returns, the relay
-   reads the clock and the cart once more, then re-checks the staleness bound
-   and the generation. So neither a slow order service nor an event committed
-   while the call was in flight can slip a send through. The last look happens
-   immediately before the send.
+   still in flight. If the order service cannot answer, the relay fails closed:
+   it retries while the reminder is fresh, and suppresses it if the check
+   returns after the staleness bound. After a successful check, it reads the
+   clock and cart again before sending. A slow check cannot send a stale
+   reminder, and a cart change committed during the call cancels the trigger.
 
 **The residual race.** A shopper can complete a purchase after check 3 passes
 and before the message reaches them. The window is the time from the check to
@@ -278,7 +278,7 @@ be deduplicated against the old cycle's.
 | Engine consumer crashes | Consumer lag | That partition pauses; reminders are late | Restart resumes from the committed offset. Reprocessed events are skipped by id. |
 | Store unavailable | Transaction errors | Consumers and timer workers stall and retry. Nothing is acknowledged. | Catch up on recovery. Reminders past the staleness bound are suppressed. |
 | Timer worker crashes | Timer lag (now minus oldest due timer) | Timers fire late | Another worker claims the shard. Timers are rows, so none are lost. A re-fired timer is harmless. |
-| Order service down | Pre-send check errors | No sends (fail closed); rows retry with backoff | Automatic if it recovers within the retry budget. Otherwise dead-lettered for replay. |
+| Order service down | Pre-send check errors | No sends (fail closed); fresh rows retry with backoff, expired rows are suppressed | Automatic if it recovers within the retry budget. Otherwise dead-lettered for replay. |
 | Notification service: transient error | Send error | Retry with exponential backoff and jitter within the retry budget | Automatic, or dead-letter when the budget runs out. |
 | Notification service: permanent error | Error class | Dead-lettered at once with the reason. Retrying cannot help. | Fix the cause, then replay. |
 
@@ -293,7 +293,8 @@ tries, is the budget. A reminder is dead-lettered when the next attempt would
 land past `DueAt + MaxLateness`, or after `MaxAttempts` (10) attempts, whichever
 comes first. The attempt cap is a backstop against a tight loop under a
 misconfigured backoff. With the defaults (1 second doubling to a 5-minute cap,
-jitter in the upper half) ten attempts span roughly 6 to 8 minutes, so the cap
+jitter in the upper half) ten attempts span roughly 4 to 8.5 minutes (nine waits, 511 seconds before
+jitter, 50 to 100% of that after it), so the cap
 binds before the staleness bound does. To use the whole 30 minutes, raise
 `MaxAttempts` to about 20. An outage of the order service or notification
 service shorter than that recovers without a dead letter. A longer one
@@ -359,11 +360,13 @@ reminders. Skipping it does not stall the partition.
 **Experiment assignment: user id or session id.** User id is stable across
 devices but does not exist for guests. Session id covers guests but splits one
 person across devices and sessions, which leaks treatment into control and
-biases the measured lift toward zero. Recommendation: user id when known,
-otherwise a stable first-party device id, and keep the assignment sticky if a
-guest logs in mid-experiment. The code hashes the id captured when the cart was
-created. Timing and message variants use the same salted hash with more
-buckets; the variant id travels with the trigger.
+biases measured lift toward zero. The code hashes the cart's current shopper id
+when it creates a reminder: a user id after login, otherwise the guest session
+id. This is stable across that id's carts and retries, but a guest who later
+logs in can receive a different assignment. For a production experiment that
+must remain sticky across login, persist the assignment against a stable
+first-party identity. Timing and message variants would use additional hash
+buckets, with the variant id stored on the trigger; neither is implemented.
 
 **Personalisation.** The notification service renders greeting and cart
 contents at send time from the cart id. Rendering late means current prices and
@@ -406,8 +409,8 @@ that keeps atomicity.
   inactivity timers/s and 1,750 reminder timers/s.
 
 **Measured.** The engine's hot path (dedupe check, transition, one in-memory
-commit) takes about 790 ns per event on one core: `BenchmarkHandleEvent`,
-787 to 791 ns/op over three runs, 7 allocations per event. Machine: Intel Core
+commit) takes about 820 ns per event on one core: `BenchmarkHandleEvent`,
+811 to 823 ns/op over three runs, 7 allocations per event. Machine: Intel Core
 i5-9600K 3.7 GHz, 6 cores, macOS (Darwin 24.6.0), Go 1.27.1. Command:
 `make bench`. This shows only that the state machine's CPU cost is negligible
 beside store I/O. It says nothing about production throughput.
