@@ -80,17 +80,16 @@ Ingest -> log -> engine -> store <- scheduler
 
 ## Requirement traceability
 
-| Requirement | Design | End-to-end timelines (`test/e2e`) | Unit tests, by area |
-|---|---|---|---|
-| 1. Success and guardrail metrics, control group | [§3](docs/DESIGN.md#3-success-and-guardrail-metrics-requirement-1) | `TestHoldoutIsRecordedButNotSent` | `TestInHoldoutSplit` |
-| 2. Detection: event-driven or batch | [§5](docs/DESIGN.md#5-detection-event-driven-not-batch-requirement-2) | `TestHappyPathThreeReminders`, `TestEditResetsTheClock` | `TestTransitions`, `TestEditResetsClockWithOneTimerPerCart`, `TestAbandonmentSchedulesRemindersFromAbandonmentTime` |
-| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestClearCancelsThenNewEditStartsNewCycle`, `TestResumeCancelsAndReArmsThenNewCycle` | Generation and pre-send checks: `TestReminderForAnOldGenerationIsANoOp`, `TestPreSendChecks`, `TestCartChangeDuringTheOrderCheckCancelsTheSend`. Identity: `TestCartIdentityFollowsTheShopperAcrossLogin`, `TestConflictingUserCannotCancelTheOwnersReminders` |
-| 4. Idempotency, no duplicate reminders | [§7](docs/DESIGN.md#7-idempotency-and-delivery-requirement-4) | `TestDuplicateEventDeliveryHasNoEffect`, `TestRestartAndLogReplaySendNothingTwice` | Keys and redelivery: `TestTriggerKey`, `TestDuplicateTimerFiringEnqueuesOnce`, `TestLostAckIsRedeliveredAndDroppedByKey`, `TestTwoRelaysSendingTheSameRowAreDeduplicatedByKey` |
-| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay` | Retry budget and deadline: `TestRetriesRideOutAShortOutage`, `TestRetriesStopAtTheStalenessBound`, `TestRetryAtTheDeadlineIsAllowedAndOneTickPastIsNot`, `TestFailureOnTheCapAttemptIsDeadLetteredInsideTheBoundAndSuppressedAfter`, `TestAttemptCapDeadLetters`. Slow calls: `TestSlowOrderCheckCannotPushASendPastTheStalenessBound`, `TestSlowSendStartedInsideTheBoundIsStampedWhenItReturns`, `TestOrderServiceDownFailsClosed`. Replay: `TestLateReplayIsSuppressedNotSent`. Timers and scheduler: `TestFailedTimerIsRedelivered`, `TestRestartedSchedulerResumesFromStore`, `TestReusedTimerIDKeepsDueOrder` |
+| Requirement | Design | Strongest tests |
+|---|---|---|
+| 1. Success and guardrail metrics, control group | [§3](docs/DESIGN.md#3-success-and-guardrail-metrics-requirement-1) | `TestHoldoutIsRecordedButNotSent`, `TestInHoldoutSplit` |
+| 2. Detection: event-driven or batch | [§5](docs/DESIGN.md#5-detection-event-driven-not-batch-requirement-2) | `TestHappyPathThreeReminders`, `TestEditResetsTheClock`, `TestTransitions` |
+| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestCartChangeDuringTheOrderCheckCancelsTheSend` |
+| 4. Idempotency, no duplicate reminders | [§7](docs/DESIGN.md#7-idempotency-and-delivery-requirement-4) | `TestDuplicateEventDeliveryHasNoEffect`, `TestRestartAndLogReplaySendNothingTwice`, `TestTwoRelaysSendingTheSameRowAreDeduplicatedByKey` |
+| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay`, `TestRetriesStopAtTheStalenessBound`, `TestFailureOnTheCapAttemptIsDeadLetteredInsideTheBoundAndSuppressedAfter` |
 
-The unit columns list the tests that carry each requirement, not every test.
-The rest are mechanics (the fake clock, backoff arithmetic, config and event
-validation, store atomicity, scheduler stop) and are named for what they check.
+Two or three tests per requirement, the ones that carry it. The rest are named
+for what they check; list them all with `go test ./... -list .`.
 
 End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
 

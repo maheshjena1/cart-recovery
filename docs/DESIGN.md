@@ -40,8 +40,10 @@ the full list, with what changes if the answer differs, is in
 [Appendix A](APPENDIX.md#a-assumptions-and-clarifying-questions).
 
 - **Offsets are measured from abandonment**, not from last activity. The first
-  reminder is therefore 60 minutes after the last activity. Config-only to
-  change: offsets `[0, 30m, 23h30m]` anchor on last activity.
+  reminder is therefore 60 minutes after the last activity. The reason: anchored
+  on last activity, the default 30-minute offset would be due at the very
+  instant detection fires. Config-only to change: offsets `[0, 30m, 23h30m]`
+  anchor on last activity.
 - **A cart view counts as resuming.** It cancels pending reminders and restarts
   the inactivity clock. Only an item edit reopens a cleared cart.
 - **The storefront emits `CartCleared`** when the last item is removed. The
