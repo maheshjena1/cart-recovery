@@ -89,6 +89,13 @@ func (r *Relay) deliver(tr store.Trigger) error {
 	if placed {
 		return r.finish(tr, now, store.Cancelled, "order_placed")
 	}
+	// The engine keeps committing events while the call above is in flight.
+	// Look at the cart once more, as late as possible. What remains after
+	// this is the handoff window described in DESIGN section 6.
+	cart, _ = r.st.Cart(tr.CartID)
+	if cart.Generation != tr.Generation || cart.Status != store.Abandoned {
+		return r.finish(tr, now, store.Cancelled, "cart_changed")
+	}
 	if now.Sub(tr.DueAt) > r.cfg.MaxLateness {
 		return r.finish(tr, now, store.Suppressed, "stale")
 	}

@@ -294,6 +294,42 @@ func TestSlowOrderCheckCannotPushASendPastTheStalenessBound(t *testing.T) {
 	}
 }
 
+// racingOrders answers "not purchased", but while the call is in flight the
+// engine commits a change to the cart.
+type racingOrders struct {
+	st     *store.Store
+	during store.Cart
+}
+
+func (o racingOrders) Placed(string) (bool, error) {
+	_ = o.st.Update(func(tx *store.Tx) error { tx.PutCart(o.during); return nil })
+	return false, nil
+}
+
+// A clear, resume or purchase is consumed while the order-service call is in
+// flight. The cart looked abandoned before the call and must be looked at
+// again before sending.
+func TestCartChangeDuringTheOrderCheckCancelsTheSend(t *testing.T) {
+	changes := map[string]store.Cart{
+		"cleared":   {ID: "A", UserID: "u1", Status: store.Cleared, Generation: 2},
+		"resumed":   {ID: "A", UserID: "u1", Status: store.Active, Generation: 2},
+		"purchased": {ID: "A", UserID: "u1", Status: store.Purchased, Generation: 2},
+	}
+	for name, during := range changes {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(config.Default())
+			f.relay = New(config.Default(), f.clk, f.st, f.n, racingOrders{f.st, during}, func() float64 { return 0.5 })
+
+			f.drain(t)
+
+			f.wantStatus(t, store.Cancelled, "cart_changed")
+			if got := f.n.Attempts(); got != 0 {
+				t.Fatal("sent a reminder for a cart that changed during the order check")
+			}
+		})
+	}
+}
+
 func TestReplayRejectsTriggersNotDeadLettered(t *testing.T) {
 	f := newFixture(config.Default())
 	if err := f.relay.Replay(key); err == nil {
