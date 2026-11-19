@@ -69,6 +69,38 @@ func TestNextTimerOrdersByDueThenIDAndSkipsDeleted(t *testing.T) {
 	}
 }
 
+// Retry timer IDs are reused: a dead-lettered trigger that is replayed starts
+// again at attempt 1 and gets the same ID with a new due time. The deleted
+// timer's leftover heap entry must not drag the new one ahead of its turn.
+func TestReusedTimerIDKeepsDueOrder(t *testing.T) {
+	s := New()
+	add := func(id string, due time.Duration) {
+		_ = s.Update(func(tx *Tx) error {
+			tx.AddTimer(Timer{ID: id, Due: t0.Add(due)})
+			return nil
+		})
+	}
+	add("retry/k/1", time.Minute)
+	first, _ := s.NextTimer()
+	s.DeleteTimer(first.ID)
+
+	add("retry/k/1", 3*time.Hour) // same ID, much later
+	add("other", 2*time.Hour)
+
+	var got []string
+	for {
+		timer, ok := s.NextTimer()
+		if !ok {
+			break
+		}
+		got = append(got, timer.ID)
+		s.DeleteTimer(timer.ID)
+	}
+	if order := strings.Join(got, " "); order != "other retry/k/1" {
+		t.Fatalf("order = %q, want %q", order, "other retry/k/1")
+	}
+}
+
 func TestPendingTriggersHonoursNextAttempt(t *testing.T) {
 	s := New()
 	_ = s.Update(func(tx *Tx) error {

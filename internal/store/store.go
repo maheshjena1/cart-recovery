@@ -263,10 +263,15 @@ func (s *Store) NextTimer() (Timer, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for len(s.due) > 0 {
-		if t, ok := s.timers[s.due[0].id]; ok {
+		e := s.due[0]
+		// An entry is live only if the timer still exists with that due
+		// time. Otherwise the timer was deleted, and its ID may since have
+		// been reused with a different due time: that timer has an entry of
+		// its own further down.
+		if t, ok := s.timers[e.id]; ok && t.Due.Equal(e.due) {
 			return t, true
 		}
-		heap.Pop(&s.due) // entry for a deleted timer
+		heap.Pop(&s.due)
 	}
 	return Timer{}, false
 }
