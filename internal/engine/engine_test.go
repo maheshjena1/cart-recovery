@@ -233,19 +233,20 @@ func TestCartIdentityFollowsTheShopperAcrossLogin(t *testing.T) {
 		wantShopper  string
 		wantUser     string
 		wantSessions string
+		wantGen      uint64
 	}{
 		{"guest stays a guest",
 			[]events.Event{ev("e1", events.ItemAdded, "", "s1"), ev("e2", events.ItemUpdated, "", "s1")},
-			"s1", "", "s1"},
+			"s1", "", "s1", 2},
 		{"guest signs in: reminders go to the user",
 			[]events.Event{ev("e1", events.ItemAdded, "", "s1"), ev("e2", events.CartResumed, "u1", "s1")},
-			"u1", "u1", "s1"},
+			"u1", "u1", "s1", 2},
 		{"user is never downgraded to a guest",
 			[]events.Event{ev("e1", events.ItemAdded, "u1", "s1"), ev("e2", events.ItemUpdated, "", "s2")},
-			"u1", "u1", "s1"},
-		{"another user cannot take the cart over",
-			[]events.Event{ev("e1", events.ItemAdded, "u1", "s1"), ev("e2", events.ItemUpdated, "u2", "s1")},
-			"u1", "u1", "s1"},
+			"u1", "u1", "s1", 2},
+		{"another user's event is ignored, not applied",
+			[]events.Event{ev("e1", events.ItemAdded, "u1", "s1"), ev("e2", events.ItemUpdated, "u2", "s9")},
+			"u1", "u1", "s1", 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -260,10 +261,43 @@ func TestCartIdentityFollowsTheShopperAcrossLogin(t *testing.T) {
 				t.Fatalf("shopper=%q user=%q session=%q, want %q %q %q",
 					c.ShopperID(), c.UserID, c.SessionID, tt.wantShopper, tt.wantUser, tt.wantSessions)
 			}
-			if c.Generation != uint64(len(tt.evs)) {
-				t.Fatalf("generation = %d: events with an identity conflict must still apply", c.Generation)
+			if c.Generation != tt.wantGen {
+				t.Fatalf("generation = %d, want %d", c.Generation, tt.wantGen)
 			}
 		})
+	}
+}
+
+// A foreign event must not reset the owner's clock or cancel their reminders.
+func TestConflictingUserCannotCancelTheOwnersReminders(t *testing.T) {
+	f := newFixture(t)
+	f.event(events.ItemAdded) // user u1
+	f.fireDue(30 * time.Minute)
+	if c := f.cart(); c.Status != store.Abandoned || c.Generation != 1 {
+		t.Fatalf("setup: status=%s gen=%d", c.Status, c.Generation)
+	}
+
+	foreign := events.Event{ID: "x1", CartID: "A", UserID: "u2", Type: events.OrderPlaced}
+	if err := f.eng.HandleEvent(foreign, f.clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.cart(); c.Status != store.Abandoned || c.Generation != 1 {
+		t.Fatalf("foreign event changed the cart: status=%s gen=%d", c.Status, c.Generation)
+	}
+	journal := f.st.Journal()
+	if last := journal[len(journal)-1]; last.Kind != store.KindConflict {
+		t.Fatalf("conflict not journalled, last entry: %v", last)
+	}
+
+	// Redelivery of the same foreign event is skipped, not journalled twice.
+	_ = f.eng.HandleEvent(foreign, f.clk.Now())
+	if got := len(f.st.Journal()); got != len(journal) {
+		t.Fatalf("redelivered conflict journalled again: %d entries, was %d", got, len(journal))
+	}
+
+	f.fireDue(time.Hour) // the owner's 30m reminder is still scheduled
+	if _, ok := f.st.Trigger("A:1:0"); !ok {
+		t.Fatal("owner's reminder was cancelled by the foreign event")
 	}
 }
 

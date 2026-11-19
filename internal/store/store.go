@@ -106,6 +106,7 @@ const (
 	KindRetry        = "Retry"
 	KindDeadLettered = "DeadLettered"
 	KindReplayed     = "Replayed"
+	KindConflict     = "IdentityConflict" // an event named a different user than the cart's
 )
 
 // Entry is one line of the audit journal: an outcome the business cares
@@ -116,13 +117,16 @@ type Entry struct {
 	Kind       string
 	CartID     string
 	Generation uint64
-	Offset     time.Duration // not set for KindAbandoned
+	Offset     time.Duration // not set for KindAbandoned or KindConflict
 	Detail     string
 }
 
 func (e Entry) String() string {
-	if e.Kind == KindAbandoned {
+	switch e.Kind {
+	case KindAbandoned:
 		return fmt.Sprintf("Abandoned(%s, gen=%d)", e.CartID, e.Generation)
+	case KindConflict:
+		return fmt.Sprintf("%s(%s, %s)", e.Kind, e.CartID, e.Detail)
 	}
 	s := fmt.Sprintf("%s(%s, offset=%s", e.Kind, e.CartID, shortDuration(e.Offset))
 	if e.Detail != "" {

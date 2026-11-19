@@ -96,6 +96,7 @@ func TestEntryString(t *testing.T) {
 		{Entry{Kind: KindTrigger, CartID: "A", Offset: 24 * time.Hour}, "Trigger(A, offset=24h)"},
 		{Entry{Kind: KindTrigger, CartID: "A", Offset: 90 * time.Second}, "Trigger(A, offset=1m30s)"},
 		{Entry{Kind: KindCancelled, CartID: "A", Offset: time.Hour, Detail: "order_placed"}, "Cancelled(A, offset=1h, order_placed)"},
+		{Entry{Kind: KindConflict, CartID: "A", Detail: "event e2 names u2, cart belongs to u1"}, "IdentityConflict(A, event e2 names u2, cart belongs to u1)"},
 	}
 	for _, tt := range tests {
 		if got := tt.e.String(); got != tt.want {
