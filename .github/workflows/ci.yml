@@ -15,3 +15,6 @@ jobs:
       - run: go install honnef.co/go/tools/cmd/staticcheck@latest
       - run: make lint
       - run: make test-race
+      # Smoke only: proves the benchmark still compiles and runs. One
+      # iteration measures nothing; use `make bench` for real numbers.
+      - run: go test ./internal/engine -run '^$' -bench . -benchtime=1x
