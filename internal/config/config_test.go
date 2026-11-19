@@ -22,6 +22,12 @@ func TestValidate(t *testing.T) {
 		{"backoff max below base", func(c *Config) { c.BackoffMax = c.BackoffBase / 2 }, false},
 		{"holdout above 100", func(c *Config) { c.HoldoutPercent = 101 }, false},
 		{"zero lateness bound", func(c *Config) { c.MaxLateness = 0 }, false},
+		{"negative lateness bound", func(c *Config) { c.MaxLateness = -time.Minute }, false},
+		{"negative attempts", func(c *Config) { c.MaxAttempts = -1 }, false},
+		{"zero backoff base", func(c *Config) { c.BackoffBase = 0 }, false},
+		{"negative backoff base", func(c *Config) { c.BackoffBase = -time.Second }, false},
+		{"negative holdout", func(c *Config) { c.HoldoutPercent = -1 }, false},
+		{"holdout 100 is allowed (the kill switch)", func(c *Config) { c.HoldoutPercent = 100 }, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
