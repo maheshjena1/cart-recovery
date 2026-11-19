@@ -230,6 +230,11 @@ in time than the last:
    returns after the staleness bound. After a successful check, it reads the
    clock and cart again before sending. A slow check cannot send a stale
    reminder, and a cart change committed during the call cancels the trigger.
+   The bound decides whether to start the send, not how long the call may take:
+   that is the notification client's timeout (a few seconds in production, an
+   assumption). A send started inside the bound and accepted after it counts as
+   sent, stamped with the time the call returned; a failed one measures its
+   backoff from then.
 
 **The residual race.** A shopper can complete a purchase after check 3 passes
 and before the message reaches them. The window is the time from the check to
@@ -253,6 +258,12 @@ The first two hops are exactly-once in effect because the dedupe record and the
 effect commit atomically. This is why the store must be one transactional
 store: with timers in Redis and state elsewhere, a crash between the two writes
 loses a timer or leaves an orphan.
+
+Several relays may drain the same outbox. In production each claims a row
+before sending (a lease, or `SELECT ... FOR UPDATE SKIP LOCKED`) so the
+provider is not called twice. The key is the backstop when a claim lapses. The
+in-process relay does not claim rows, and a test shows two relays sending the
+same row are deduplicated by the key.
 
 The last hop crosses a system boundary, so it cannot be atomic. It is
 at-least-once plus an idempotent receiver. That is the honest meaning of

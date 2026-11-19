@@ -115,6 +115,10 @@ func (r *Relay) deliver(tr store.Trigger) error {
 		Offset:    tr.Offset,
 		DueAt:     tr.DueAt,
 	})
+	// The staleness bound decides whether to start the call, not how long
+	// the call may take; the client's timeout bounds that. The outcome is
+	// stamped, and a retry's backoff measured, from when the call returned.
+	now = r.clk.Now()
 	switch {
 	case err == nil:
 		return r.finish(tr, now, store.Sent, "")

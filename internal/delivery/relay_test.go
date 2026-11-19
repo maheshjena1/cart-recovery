@@ -3,6 +3,7 @@ package delivery
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -346,6 +347,128 @@ func TestCartChangeDuringTheOrderCheckCancelsTheSend(t *testing.T) {
 			f.wantStatus(t, store.Cancelled, "cart_changed")
 			if got := f.n.Attempts(); got != 0 {
 				t.Fatal("sent a reminder for a cart that changed during the order check")
+			}
+		})
+	}
+}
+
+// slowNotifier takes d to answer, then delegates (or fails with err).
+type slowNotifier struct {
+	clk   *clock.Fake
+	d     time.Duration
+	err   error
+	inner *notifier.Stub
+}
+
+func (n slowNotifier) Send(tr notifier.Trigger) error {
+	n.clk.Advance(n.d)
+	if n.err != nil {
+		return n.err
+	}
+	return n.inner.Send(tr)
+}
+
+// The bound decides whether to start the send. A send started inside the
+// bound that is accepted after it still counts as sent, and is stamped with
+// the time the call returned.
+func TestSlowSendStartedInsideTheBoundIsStampedWhenItReturns(t *testing.T) {
+	f := newFixture(config.Default())
+	f.relay = New(config.Default(), f.clk, f.st, slowNotifier{clk: f.clk, d: 10 * time.Second, inner: f.n}, f.orders, func() float64 { return 0.5 })
+	f.clk.Advance(29*time.Minute + 55*time.Second) // 5s inside the bound; the call takes 10s
+
+	f.drain(t)
+
+	f.wantStatus(t, store.Sent, "")
+	journal := f.st.Journal()
+	if last, want := journal[len(journal)-1].At, t0.Add(30*time.Minute+5*time.Second); !last.Equal(want) {
+		t.Fatalf("outcome stamped +%v, want +%v (when the call returned)", last.Sub(t0), want.Sub(t0))
+	}
+}
+
+// Backoff is measured from the failure, not from before a slow call.
+func TestRetryBackoffStartsWhenAFailedSendReturns(t *testing.T) {
+	f := newFixture(config.Default())
+	slow := slowNotifier{clk: f.clk, d: 10 * time.Second, err: notifier.ErrTransient, inner: f.n}
+	f.relay = New(config.Default(), f.clk, f.st, slow, f.orders, func() float64 { return 0.5 })
+
+	f.drain(t)
+
+	tr, _ := f.st.Trigger(key)
+	if want := t0.Add(10*time.Second + 750*time.Millisecond); !tr.NextAttempt.Equal(want) {
+		t.Fatalf("next attempt at +%v, want +%v", tr.NextAttempt.Sub(t0), want.Sub(t0))
+	}
+}
+
+// barrierNotifier holds every Send until two are in flight, so two relays are
+// guaranteed to have both read the row as pending before either finishes it.
+type barrierNotifier struct {
+	wg    sync.WaitGroup
+	inner *notifier.Stub
+}
+
+func (b *barrierNotifier) Send(tr notifier.Trigger) error {
+	b.wg.Done()
+	b.wg.Wait()
+	return b.inner.Send(tr)
+}
+
+// Nothing in the code claims an outbox row, so two relays can send the same
+// reminder. The idempotency key is what keeps it to one acceptance. (In
+// production a row claim avoids the wasted call; the key is the backstop.)
+func TestTwoRelaysSendingTheSameRowAreDeduplicatedByKey(t *testing.T) {
+	f := newFixture(config.Default())
+	b := &barrierNotifier{inner: f.n}
+	b.wg.Add(2)
+	jitter := func() float64 { return 0.5 }
+	a := New(config.Default(), f.clk, f.st, b, f.orders, jitter)
+	c := New(config.Default(), f.clk, f.st, b, f.orders, jitter)
+
+	var done sync.WaitGroup
+	for _, r := range []*Relay{a, c} {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			if err := r.Drain(); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	done.Wait()
+
+	f.wantStatus(t, store.Sent, "")
+	if sent, dups := len(f.n.Sent()), f.n.Duplicates(); sent != 1 || dups != 1 {
+		t.Fatalf("notifier accepted %d and dropped %d duplicates, want 1 and 1", sent, dups)
+	}
+}
+
+// The retry scheduler's boundary: a retry landing exactly on the deadline is
+// still allowed (a send at exactly the bound is allowed too); one tick later
+// is not.
+func TestRetryAtTheDeadlineIsAllowedAndOneTickPastIsNot(t *testing.T) {
+	cfg := config.Default()
+	cfg.BackoffBase, cfg.BackoffMax = 8*time.Second, 8*time.Second // at jitter 0.5 the delay is exactly 6s
+	deadline := t0.Add(cfg.MaxLateness)
+
+	tests := []struct {
+		name       string
+		failAt     time.Time
+		wantStatus store.TriggerStatus
+		wantReason string
+	}{
+		{"exactly at the deadline", deadline.Add(-6 * time.Second), store.Pending, ""},
+		{"one tick past it", deadline.Add(-6*time.Second + time.Nanosecond), store.Suppressed, "retry_deadline"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(cfg)
+			f.orders.SetError(errors.New("timeout"))
+			f.clk.Set(tt.failAt)
+
+			f.drain(t)
+
+			f.wantStatus(t, tt.wantStatus, tt.wantReason)
+			if tr, _ := f.st.Trigger(key); tt.wantStatus == store.Pending && !tr.NextAttempt.Equal(deadline) {
+				t.Fatalf("next attempt at +%v, want the deadline +%v", tr.NextAttempt.Sub(t0), deadline.Sub(t0))
 			}
 		})
 	}
