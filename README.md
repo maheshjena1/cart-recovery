@@ -14,7 +14,7 @@ process on a fake clock, with in-memory adapters. Nothing is sent.
 Needs Go 1.27. No dependencies, no services.
 
 ```
-make demo        # the 8 end-to-end scenarios, printed as timelines
+make demo        # the 10 end-to-end scenarios, printed as timelines
 make test-race   # all tests under the race detector
 make bench       # engine hot-path benchmark
 make lint        # go vet, gofmt, staticcheck if installed
@@ -81,9 +81,9 @@ Ingest -> log -> engine -> store <- scheduler
 |---|---|---|
 | 1. Success and guardrail metrics, control group | [§3](docs/DESIGN.md#3-success-and-guardrail-metrics-requirement-1) | `TestHoldoutIsRecordedButNotSent`, `TestInHoldoutSplit` |
 | 2. Detection: event-driven or batch | [§5](docs/DESIGN.md#5-detection-event-driven-not-batch-requirement-2) | `TestHappyPathThreeReminders`, `TestEditResetsTheClock`, `TestEditResetsClockWithOneTimerPerCart`, `TestTransitions` |
-| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestReminderForAnOldGenerationIsANoOp`, `TestPreSendChecks` |
+| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestReminderForAnOldGenerationIsANoOp`, `TestPreSendChecks`, `TestClearCancelsThenNewEditStartsNewCycle`, `TestResumeCancelsAndReArmsThenNewCycle` |
 | 4. Idempotency, no duplicate reminders | [§7](docs/DESIGN.md#7-idempotency-and-delivery-requirement-4) | `TestDuplicateEventDeliveryHasNoEffect`, `TestRestartAndLogReplaySendNothingTwice`, `TestDuplicateTimerFiringEnqueuesOnce`, `TestLostAckIsRedeliveredAndDroppedByKey` |
-| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay`, `TestAttemptCapDeadLetters`, `TestOrderServiceDownFailsClosed`, `TestFailedTimerIsRedelivered`, `TestRestartedSchedulerResumesFromStore`, `TestLateReplayIsSuppressedNotSent` |
+| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay`, `TestAttemptCapDeadLetters`, `TestOrderServiceDownFailsClosed`, `TestRetriesRideOutAShortOutage`, `TestRetriesStopAtTheStalenessBound`, `TestFailedTimerIsRedelivered`, `TestRestartedSchedulerResumesFromStore`, `TestLateReplayIsSuppressedNotSent` |
 
 End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
 
@@ -92,9 +92,13 @@ End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
 - **In memory, one process.** The store's atomicity is real (buffered writes,
   one lock) but its durability is simulated: a "restart" rebuilds the engine,
   scheduler and relay over the same store object.
-- **No concurrency in the pipeline.** One mutex plays the single writer per
-  partition. Partitioning, consumer lag and timers routed through the log are
-  designed (DESIGN §4), not built.
+- **No partitioning.** The store's lock serialises every engine write, from
+  log events and timer fires alike; the pipeline mutex only orders log
+  consumption. Partitions, consumer lag and timer fires routed through the log
+  are designed (DESIGN §4), not built.
+- **Head-of-line blocking.** One persistently failing timer blocks every timer
+  behind it. Production uses per-shard leases and quarantines a timer after N
+  consecutive failures, journalled (DESIGN §8). Not built.
 - **No load test.** The only measured number is the engine micro-benchmark.
   Capacity figures in the design are labelled estimates.
 - **Dedupe records never expire.** Retention is specified (DESIGN §7), not

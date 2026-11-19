@@ -42,6 +42,7 @@ the answer differs.
 |---|---|---|
 | Are offsets measured from abandonment or from last activity? | From abandonment (last activity + window). First reminder is 60 minutes after the last activity. | Config only: offsets `[0, 30m, 23h30m]` give last-activity anchoring. Zero is a valid offset. |
 | Does "resumed" include viewing the cart? | Yes. A view cancels pending reminders and restarts the inactivity clock. | If only edits count, drop `CartResumed` from the activity set. One line. |
+| How does the engine learn the cart is empty? | The storefront emits `CartCleared` when the last item is removed. The engine does not track item counts. | A cart emptied by `ItemRemoved` alone would still be reminded. Either fix the producer or give the engine an item count. |
 | Is `CheckoutStarted` an outcome? | No. It is activity. An abandoned checkout is the most valuable cart to remind. | If it should stop reminders, treat it like `OrderPlaced`. |
 | Which timestamp drives inactivity? | Server ingest time (the log's append time), not the client's `occurredAt`. | Client time would need an out-of-order tolerance rule and clock-skew bounds. |
 | Does a cart id survive a purchase? | No. A purchase is terminal; the next journey gets a new cart id. | Reopen on `ItemAdded`, as already done for cleared carts. |
@@ -126,8 +127,12 @@ race with, and a timer can never overtake an event that is still queued in the
 partition. Under consumer lag, the fire message waits behind the shopper's
 latest edit and sees it.
 
-In code, `internal/pipeline` wires the same components in one process. A mutex
-stands in for the single writer, and the scheduler calls the engine directly.
+In code, `internal/pipeline` wires the same components in one process, and the
+scheduler calls the engine directly rather than through the log. What stands in
+for the single writer is the store's lock: it serialises every engine write,
+whether it comes from a log event or from a timer fire. The pipeline's own mutex
+only orders log consumption. Routing timer fires through the log is designed,
+not built.
 
 **Detection, then firing with cancellation checks**
 
@@ -269,14 +274,35 @@ be deduplicated against the old cycle's.
 | Engine consumer crashes | Consumer lag | That partition pauses; reminders are late | Restart resumes from the committed offset. Reprocessed events are skipped by id. |
 | Store unavailable | Transaction errors | Consumers and timer workers stall and retry. Nothing is acknowledged. | Catch up on recovery. Reminders past the staleness bound are suppressed. |
 | Timer worker crashes | Timer lag (now minus oldest due timer) | Timers fire late | Another worker claims the shard. Timers are rows, so none are lost. A re-fired timer is harmless. |
-| Order service down | Pre-send check errors | No sends (fail closed); rows retry with backoff | Automatic. Past the attempt cap, rows are dead-lettered for replay. |
-| Notification service: transient error | Send error | Retry with exponential backoff and jitter, up to `MaxAttempts` (5) | Automatic, or dead-letter at the cap. |
+| Order service down | Pre-send check errors | No sends (fail closed); rows retry with backoff | Automatic if it recovers within the retry budget. Otherwise dead-lettered for replay. |
+| Notification service: transient error | Send error | Retry with exponential backoff and jitter within the retry budget | Automatic, or dead-letter when the budget runs out. |
 | Notification service: permanent error | Error class | Dead-lettered at once with the reason. Retrying cannot help. | Fix the cause, then replay. |
 
 **Retry policy.** Delay doubles from 1 second to a 5-minute cap. Jitter picks a
 point in the upper half of each delay, so a burst of failures does not retry in
 step and no retry is immediate. The retry is a durable timer, not a sleeping
 goroutine, so it survives a restart.
+
+**Retry budget.** A reminder is worth sending until the staleness bound
+(`MaxLateness`, 30 minutes after its due time), so that, not a fixed number of
+tries, is the budget. A reminder is dead-lettered when the next attempt would
+land past `DueAt + MaxLateness`, or after `MaxAttempts` (10) attempts, whichever
+comes first. The attempt cap is a backstop against a tight loop under a
+misconfigured backoff. With the defaults (1 second doubling to a 5-minute cap,
+jitter in the upper half) ten attempts span roughly 6 to 8 minutes, so the cap
+binds before the staleness bound does. To use the whole 30 minutes, raise
+`MaxAttempts` to about 20. An outage of the order service or notification
+service shorter than that recovers without a dead letter. A longer one
+dead-letters the reminder with the reason, and a late replay is suppressed as
+stale (section 8, replay runbook).
+
+**Head-of-line blocking in the scheduler.** In this single-process version the
+scheduler fires timers in due order and holds the queue behind a timer whose
+handler keeps failing, so one poisoned timer delays every timer behind it.
+Production avoids this in two ways: timers are sharded, each shard has its own
+lease and worker, so a failing timer stalls one shard and not all; and a timer
+that fails N consecutive times is quarantined (moved aside, journalled with its
+error, alerted on) so the shard moves on. Neither is built.
 
 **Dead-letter queue.** A reminder that exhausts its attempts or fails
 permanently becomes a `DEAD` outbox row carrying the reason. In production I

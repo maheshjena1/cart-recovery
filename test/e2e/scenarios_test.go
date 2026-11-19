@@ -68,6 +68,37 @@ func TestOrderPlacedBetweenFireAndSendIsCaught(t *testing.T) {
 	s.expectSent()
 }
 
+// The shopper empties the cart after the first reminder. The rest are
+// cancelled, including the 24h one. Adding an item much later starts a fresh
+// cycle under a new generation.
+func TestClearCancelsThenNewEditStartsNewCycle(t *testing.T) {
+	s := newScenario(t, config.Default())
+	s.at("00:00", events.ItemAdded, "A").
+		advanceTo("00:30").expect("Abandoned(A, gen=1)").
+		advanceTo("01:00").expect("Trigger(A, offset=30m)").
+		at("01:10", events.CartCleared, "A").
+		advanceTo("25:00").expect(). // the 1h and 24h reminders fire as no-ops
+		at("26:00", events.ItemAdded, "A").
+		advanceTo("26:30").expect("Abandoned(A, gen=3)").
+		advanceTo("72:00").expect("Trigger(A, offset=30m)", "Trigger(A, offset=1h)", "Trigger(A, offset=24h)")
+	s.expectSent("A:1:0", "A:3:0", "A:3:1", "A:3:2")
+}
+
+// The shopper comes back and looks at the cart after it was abandoned, then
+// leaves again without doing anything. The pending reminders are cancelled;
+// the view restarts the inactivity clock, so a new cycle follows.
+func TestResumeCancelsAndReArmsThenNewCycle(t *testing.T) {
+	s := newScenario(t, config.Default())
+	s.at("00:00", events.ItemAdded, "A").
+		advanceTo("00:30").expect("Abandoned(A, gen=1)").
+		advanceTo("01:00").expect("Trigger(A, offset=30m)").
+		at("01:10", events.CartResumed, "A").
+		advanceTo("01:39").expect(). // the 01:30 reminder of the old cycle is void
+		advanceTo("01:40").expect("Abandoned(A, gen=2)").
+		advanceTo("72:00").expect("Trigger(A, offset=30m)", "Trigger(A, offset=1h)", "Trigger(A, offset=24h)")
+	s.expectSent("A:1:0", "A:2:0", "A:2:1", "A:2:2")
+}
+
 func TestDuplicateEventDeliveryHasNoEffect(t *testing.T) {
 	s := newScenario(t, config.Default())
 	s.at("00:00", events.ItemAdded, "A")
