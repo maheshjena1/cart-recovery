@@ -84,6 +84,11 @@ func (r *Relay) deliver(tr store.Trigger) error {
 	placed, err := r.orders.Placed(tr.CartID)
 	now = r.clk.Now()
 	if err != nil {
+		// Already past the bound: suppress. Dead-lettering would queue a
+		// reminder that a replay could only suppress too.
+		if now.Sub(tr.DueAt) > r.cfg.MaxLateness {
+			return r.finish(tr, now, store.Suppressed, "stale")
+		}
 		return r.retry(tr, now, fmt.Errorf("order check: %w", err))
 	}
 	if placed {
