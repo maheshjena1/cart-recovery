@@ -84,11 +84,6 @@ func (r *Relay) deliver(tr store.Trigger) error {
 	placed, err := r.orders.Placed(tr.CartID)
 	now = r.clk.Now()
 	if err != nil {
-		// Already past the bound: suppress. Dead-lettering would queue a
-		// reminder that a replay could only suppress too.
-		if now.Sub(tr.DueAt) > r.cfg.MaxLateness {
-			return r.finish(tr, now, store.Suppressed, "stale")
-		}
 		return r.retry(tr, now, fmt.Errorf("order check: %w", err))
 	}
 	if placed {
@@ -129,14 +124,23 @@ func (r *Relay) deliver(tr store.Trigger) error {
 	}
 }
 
-// retry schedules another attempt. Two things end the retries, and they end
-// differently. Reaching the attempt cap dead-lettered the trigger: something
-// keeps failing and a person can still fix it in time. A next attempt that
-// would land past the staleness bound suppresses it ("retry_deadline"): no
-// person can make a late reminder worth sending, so it is a metric, not a
-// ticket, and it stays out of the dead-letter queue.
+// retry schedules another attempt, or ends the retries. now must be the time
+// the failed call returned. How they end depends on whether a person could
+// still act:
+//
+//   - Already past the staleness bound: suppressed ("stale"). Checked first,
+//     so a slow call that fails after the bound cannot be dead-lettered by
+//     the attempt cap.
+//   - Attempt cap reached inside the bound: dead-lettered. Something keeps
+//     failing and a person can still fix it in time.
+//   - The next attempt would land past the bound: suppressed
+//     ("retry_deadline"). No person can make a late reminder worth sending,
+//     so it is a metric, not a ticket, and stays out of the dead-letter queue.
 func (r *Relay) retry(tr store.Trigger, now time.Time, cause error) error {
 	tr.Attempts++
+	if now.Sub(tr.DueAt) > r.cfg.MaxLateness {
+		return r.finish(tr, now, store.Suppressed, "stale")
+	}
 	if tr.Attempts >= r.cfg.MaxAttempts {
 		return r.finish(tr, now, store.Dead, fmt.Sprintf("gave up after %d attempts: %v", tr.Attempts, cause))
 	}

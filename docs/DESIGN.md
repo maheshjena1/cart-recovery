@@ -303,6 +303,10 @@ goroutine, so it survives a restart.
 tries, is the budget. Retries end at whichever comes first of two limits, and
 they end differently:
 
+- A call fails after `DueAt + MaxLateness` has already passed, whatever the
+  attempt count: the reminder is **suppressed** as `stale`. This is checked
+  first, so a slow failure on the cap attempt cannot dead-letter an expired
+  reminder.
 - The next attempt would land past `DueAt + MaxLateness`: the reminder is
   **suppressed** with reason `retry_deadline` and journalled. It is counted
   with suppressed-stale.

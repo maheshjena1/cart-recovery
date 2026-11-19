@@ -399,6 +399,38 @@ func TestRetryBackoffStartsWhenAFailedSendReturns(t *testing.T) {
 	}
 }
 
+// The send fails on the attempt that reaches the cap. Whether that is a dead
+// letter depends on when the failure came back: inside the bound a person can
+// still act; after it, a replay could only suppress the reminder.
+func TestFailureOnTheCapAttemptIsDeadLetteredInsideTheBoundAndSuppressedAfter(t *testing.T) {
+	cfg := config.Default()
+	cfg.MaxAttempts = 1 // the first failure is the cap attempt
+	tests := []struct {
+		name       string
+		sendTime   time.Duration // how long the failing call takes
+		wantStatus store.TriggerStatus
+		wantReason string
+	}{
+		{"failure returns inside the bound", 4 * time.Second, store.Dead, "gave up after 1 attempts: transient failure"},
+		{"failure returns after the bound", 10 * time.Second, store.Suppressed, "stale"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(cfg)
+			slow := slowNotifier{clk: f.clk, d: tt.sendTime, err: notifier.ErrTransient, inner: f.n}
+			f.relay = New(cfg, f.clk, f.st, slow, f.orders, func() float64 { return 0.5 })
+			f.clk.Advance(29*time.Minute + 55*time.Second) // 5s inside the bound when the call starts
+
+			f.drain(t)
+
+			f.wantStatus(t, tt.wantStatus, tt.wantReason)
+			if dead := len(f.st.DeadLetters()) == 1; dead != (tt.wantStatus == store.Dead) {
+				t.Fatalf("dead-letter queue = %+v", f.st.DeadLetters())
+			}
+		})
+	}
+}
+
 // barrierNotifier holds every Send until two are in flight, so two relays are
 // guaranteed to have both read the row as pending before either finishes it.
 type barrierNotifier struct {
