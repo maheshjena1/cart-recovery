@@ -268,6 +268,32 @@ func TestPreSendChecks(t *testing.T) {
 	}
 }
 
+// slowOrders answers "not purchased", but only after d has passed.
+type slowOrders struct {
+	clk *clock.Fake
+	d   time.Duration
+}
+
+func (o slowOrders) Placed(string) (bool, error) {
+	o.clk.Advance(o.d)
+	return false, nil
+}
+
+// The reminder is fresh when the pass starts and stale by the time the order
+// service answers. The staleness bound must hold at the moment of sending.
+func TestSlowOrderCheckCannotPushASendPastTheStalenessBound(t *testing.T) {
+	f := newFixture(config.Default())
+	f.relay = New(config.Default(), f.clk, f.st, f.n, slowOrders{f.clk, 2 * time.Minute}, func() float64 { return 0.5 })
+	f.clk.Advance(29 * time.Minute) // 1m inside the 30m bound
+
+	f.drain(t)
+
+	f.wantStatus(t, store.Suppressed, "stale")
+	if got := f.n.Attempts(); got != 0 {
+		t.Fatalf("sent a reminder %v past its due time", 31*time.Minute)
+	}
+}
+
 func TestReplayRejectsTriggersNotDeadLettered(t *testing.T) {
 	f := newFixture(config.Default())
 	if err := f.relay.Replay(key); err == nil {

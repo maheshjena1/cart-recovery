@@ -54,9 +54,8 @@ func (r *Relay) Drain() error {
 }
 
 func (r *Relay) drain() error {
-	now := r.clk.Now()
-	for _, tr := range r.st.PendingTriggers(now) {
-		if err := r.deliver(tr, now); err != nil {
+	for _, tr := range r.st.PendingTriggers(r.clk.Now()) {
+		if err := r.deliver(tr); err != nil {
 			return err
 		}
 	}
@@ -66,7 +65,13 @@ func (r *Relay) drain() error {
 // deliver runs the pre-send checks, cheapest first, then sends. The holdout
 // check is deliberately last: a holdout shopper's reminder is recorded as
 // suppressed only if a treated shopper's would actually have been sent.
-func (r *Relay) deliver(tr store.Trigger, now time.Time) error {
+//
+// The clock is read per trigger, and again after the order-service call:
+// that call can be slow, and a pass over many triggers can take a while, so
+// a time read at the start of the pass says nothing about when the send
+// happens.
+func (r *Relay) deliver(tr store.Trigger) error {
+	now := r.clk.Now()
 	cart, _ := r.st.Cart(tr.CartID)
 	if cart.Generation != tr.Generation || cart.Status != store.Abandoned {
 		return r.finish(tr, now, store.Cancelled, "cart_changed")
@@ -77,11 +82,15 @@ func (r *Relay) deliver(tr store.Trigger, now time.Time) error {
 	// The cart's own state can trail the order service by the lag of the
 	// event log. Ask the authority. If it cannot answer, do not send blind.
 	placed, err := r.orders.Placed(tr.CartID)
+	now = r.clk.Now()
 	if err != nil {
 		return r.retry(tr, now, fmt.Errorf("order check: %w", err))
 	}
 	if placed {
 		return r.finish(tr, now, store.Cancelled, "order_placed")
+	}
+	if now.Sub(tr.DueAt) > r.cfg.MaxLateness {
+		return r.finish(tr, now, store.Suppressed, "stale")
 	}
 	if InHoldout(tr.ShopperID, r.cfg.HoldoutSalt, r.cfg.HoldoutPercent) {
 		return r.finish(tr, now, store.Suppressed, "holdout")
