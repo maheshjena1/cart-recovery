@@ -5,8 +5,9 @@
 //	                           relay -> notifier
 //
 // It stands in for the production topology, where the log is a topic
-// partitioned by cart id and each partition has a single consumer. Here one
-// mutex plays the single writer.
+// partitioned by cart id and each partition has a single consumer. Here the
+// store's lock serialises every write, whether it comes from a log event or
+// from a timer fire; the pipeline's own mutex only orders log consumption.
 package pipeline
 
 import (

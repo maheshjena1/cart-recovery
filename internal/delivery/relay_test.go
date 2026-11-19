@@ -3,6 +3,7 @@ package delivery
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,6 +180,62 @@ func TestOrderServiceDownFailsClosed(t *testing.T) {
 	f.clk.Advance(time.Minute)
 	f.drain(t)
 	f.wantStatus(t, store.Sent, "")
+}
+
+// orderServiceDownFor runs the relay once a second for d with the order
+// service down, then brings it back.
+func (f *fixture) orderServiceDownFor(t *testing.T, d time.Duration) {
+	t.Helper()
+	f.orders.SetError(errors.New("timeout"))
+	for elapsed := time.Duration(0); elapsed < d; elapsed += time.Second {
+		f.drain(t)
+		f.clk.Advance(time.Second)
+	}
+	f.orders.SetError(nil)
+}
+
+func TestRetriesRideOutAShortOutage(t *testing.T) {
+	f := newFixture(config.Default())
+	f.orderServiceDownFor(t, 2*time.Minute)
+
+	if tr, _ := f.st.Trigger(key); tr.Status != store.Pending {
+		t.Fatalf("trigger is %s (%q) after a 2m outage, want PENDING", tr.Status, tr.Reason)
+	}
+	for range 10 * 60 { // keep draining; the next retry is a few minutes out
+		f.drain(t)
+		f.clk.Advance(time.Second)
+	}
+	f.wantStatus(t, store.Sent, "")
+	if len(f.st.DeadLetters()) != 0 {
+		t.Fatal("outage within the retry budget produced a dead letter")
+	}
+}
+
+func TestRetriesStopAtTheStalenessBound(t *testing.T) {
+	cfg := config.Default()
+	cfg.MaxAttempts = 1000 // out of the way: the staleness bound must be what stops retries
+	f := newFixture(cfg)
+	f.orderServiceDownFor(t, 40*time.Minute)
+
+	tr, _ := f.st.Trigger(key)
+	if tr.Status != store.Dead || !strings.Contains(tr.Reason, "staleness bound") {
+		t.Fatalf("trigger is %s (%q), want DEAD at the staleness bound", tr.Status, tr.Reason)
+	}
+	if tr.Attempts <= 5 {
+		t.Fatalf("gave up after %d attempts; the bound, not the attempt cap, should decide, and later than this", tr.Attempts)
+	}
+	if last := tr.NextAttempt; last.After(t0.Add(cfg.MaxLateness)) {
+		t.Fatalf("scheduled an attempt at +%v, past the bound", last.Sub(t0))
+	}
+	if f.n.Attempts() != 0 {
+		t.Fatal("sent while the order service was down")
+	}
+
+	// Replayed now, past the bound, it is suppressed, never sent.
+	if err := f.relay.Replay(key); err != nil {
+		t.Fatal(err)
+	}
+	f.wantStatus(t, store.Suppressed, "stale")
 }
 
 func TestPreSendChecks(t *testing.T) {
