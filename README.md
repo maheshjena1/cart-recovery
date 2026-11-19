@@ -78,13 +78,17 @@ Ingest -> log -> engine -> store <- scheduler
 
 ## Requirement traceability
 
-| Requirement | Design | Tests |
-|---|---|---|
-| 1. Success and guardrail metrics, control group | [§3](docs/DESIGN.md#3-success-and-guardrail-metrics-requirement-1) | `TestHoldoutIsRecordedButNotSent`, `TestInHoldoutSplit` |
-| 2. Detection: event-driven or batch | [§5](docs/DESIGN.md#5-detection-event-driven-not-batch-requirement-2) | `TestHappyPathThreeReminders`, `TestEditResetsTheClock`, `TestEditResetsClockWithOneTimerPerCart`, `TestTransitions` |
-| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestCartChangeDuringTheOrderCheckCancelsTheSend`, `TestReminderForAnOldGenerationIsANoOp`, `TestPreSendChecks`, `TestClearCancelsThenNewEditStartsNewCycle`, `TestResumeCancelsAndReArmsThenNewCycle` |
-| 4. Idempotency, no duplicate reminders | [§7](docs/DESIGN.md#7-idempotency-and-delivery-requirement-4) | `TestDuplicateEventDeliveryHasNoEffect`, `TestRestartAndLogReplaySendNothingTwice`, `TestDuplicateTimerFiringEnqueuesOnce`, `TestLostAckIsRedeliveredAndDroppedByKey` |
-| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay`, `TestAttemptCapDeadLetters`, `TestOrderServiceDownFailsClosed`, `TestOrderCheckFailingAfterTheBoundSuppressesNotDeadLetters`, `TestSlowOrderCheckCannotPushASendPastTheStalenessBound`, `TestRetriesRideOutAShortOutage`, `TestRetriesStopAtTheStalenessBound`, `TestFailedTimerIsRedelivered`, `TestRestartedSchedulerResumesFromStore`, `TestLateReplayIsSuppressedNotSent` |
+| Requirement | Design | End-to-end timelines (`test/e2e`) | Unit tests, by area |
+|---|---|---|---|
+| 1. Success and guardrail metrics, control group | [§3](docs/DESIGN.md#3-success-and-guardrail-metrics-requirement-1) | `TestHoldoutIsRecordedButNotSent` | `TestInHoldoutSplit` |
+| 2. Detection: event-driven or batch | [§5](docs/DESIGN.md#5-detection-event-driven-not-batch-requirement-2) | `TestHappyPathThreeReminders`, `TestEditResetsTheClock` | `TestTransitions`, `TestEditResetsClockWithOneTimerPerCart`, `TestAbandonmentSchedulesRemindersFromAbandonmentTime` |
+| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestClearCancelsThenNewEditStartsNewCycle`, `TestResumeCancelsAndReArmsThenNewCycle` | Generation and pre-send checks: `TestReminderForAnOldGenerationIsANoOp`, `TestPreSendChecks`, `TestCartChangeDuringTheOrderCheckCancelsTheSend`. Identity: `TestCartIdentityFollowsTheShopperAcrossLogin`, `TestConflictingUserCannotCancelTheOwnersReminders` |
+| 4. Idempotency, no duplicate reminders | [§7](docs/DESIGN.md#7-idempotency-and-delivery-requirement-4) | `TestDuplicateEventDeliveryHasNoEffect`, `TestRestartAndLogReplaySendNothingTwice` | Keys and redelivery: `TestTriggerKey`, `TestDuplicateTimerFiringEnqueuesOnce`, `TestLostAckIsRedeliveredAndDroppedByKey`, `TestTwoRelaysSendingTheSameRowAreDeduplicatedByKey` |
+| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay` | Retry budget and deadline: `TestRetriesRideOutAShortOutage`, `TestRetriesStopAtTheStalenessBound`, `TestRetryAtTheDeadlineIsAllowedAndOneTickPastIsNot`, `TestFailureOnTheCapAttemptIsDeadLetteredInsideTheBoundAndSuppressedAfter`, `TestAttemptCapDeadLetters`. Slow calls: `TestSlowOrderCheckCannotPushASendPastTheStalenessBound`, `TestSlowSendStartedInsideTheBoundIsStampedWhenItReturns`, `TestOrderServiceDownFailsClosed`. Replay: `TestLateReplayIsSuppressedNotSent`. Timers and scheduler: `TestFailedTimerIsRedelivered`, `TestRestartedSchedulerResumesFromStore`, `TestReusedTimerIDKeepsDueOrder` |
+
+The unit columns list the tests that carry each requirement, not every test.
+The rest are mechanics (the fake clock, backoff arithmetic, config and event
+validation, store atomicity, scheduler stop) and are named for what they check.
 
 End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
 
@@ -110,4 +114,7 @@ End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
   session id to user id; production should persist assignment against a stable
   first-party identity if treatment must survive login (DESIGN §9).
 - CI (`.github/workflows/ci.yml`: lint with staticcheck, then race tests) runs
-  on GitHub for every push. It does not run the demo or the benchmark.
+  on GitHub for every push. It also smoke-runs the engine benchmark for one
+  iteration, which only proves it compiles and runs and measures nothing; use
+  `make bench` for real numbers. It does not run the demo, since the race tests
+  already run the same end-to-end scenarios.
