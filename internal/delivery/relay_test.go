@@ -213,8 +213,7 @@ func TestRetriesRideOutAShortOutage(t *testing.T) {
 }
 
 func TestRetriesStopAtTheStalenessBound(t *testing.T) {
-	cfg := config.Default()
-	cfg.MaxAttempts = 1000 // out of the way: the staleness bound must be what stops retries
+	cfg := config.Default() // under the defaults the bound, not the cap, must stop retries
 	f := newFixture(cfg)
 	f.orderServiceDownFor(t, 40*time.Minute)
 
@@ -222,8 +221,8 @@ func TestRetriesStopAtTheStalenessBound(t *testing.T) {
 	// nothing for an operator to replay.
 	f.wantStatus(t, store.Suppressed, "retry_deadline")
 	tr, _ := f.st.Trigger(key)
-	if tr.Attempts <= 5 {
-		t.Fatalf("gave up after %d attempts; the bound, not the attempt cap, should decide, and later than this", tr.Attempts)
+	if tr.Attempts < 10 || tr.Attempts >= cfg.MaxAttempts {
+		t.Fatalf("stopped after %d attempts, want the bound to decide: well past 10 and under the cap of %d", tr.Attempts, cfg.MaxAttempts)
 	}
 	if last := tr.NextAttempt; last.After(t0.Add(cfg.MaxLateness)) {
 		t.Fatalf("scheduled an attempt at +%v, past the bound", last.Sub(t0))

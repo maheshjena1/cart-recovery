@@ -278,8 +278,8 @@ be deduplicated against the old cycle's.
 | Engine consumer crashes | Consumer lag | That partition pauses; reminders are late | Restart resumes from the committed offset. Reprocessed events are skipped by id. |
 | Store unavailable | Transaction errors | Consumers and timer workers stall and retry. Nothing is acknowledged. | Catch up on recovery. Reminders past the staleness bound are suppressed. |
 | Timer worker crashes | Timer lag (now minus oldest due timer) | Timers fire late | Another worker claims the shard. Timers are rows, so none are lost. A re-fired timer is harmless. |
-| Order service down | Pre-send check errors | No sends (fail closed); fresh rows retry with backoff, expired rows are suppressed | Automatic if it recovers within the retry budget. Otherwise dead-lettered at the attempt cap, or suppressed (`retry_deadline`) if the bound comes first. |
-| Notification service: transient error | Send error | Retry with exponential backoff and jitter within the retry budget | Automatic, or dead-letter at the attempt cap, or suppress (`retry_deadline`) at the bound. |
+| Order service down | Pre-send check errors | No sends (fail closed); fresh rows retry with backoff, expired rows are suppressed | Automatic if it recovers within the bound. Otherwise suppressed (`retry_deadline`); dead-lettered only if the safety-valve cap is hit first. |
+| Notification service: transient error | Send error | Retry with exponential backoff and jitter within the retry budget | Automatic if it recovers within the bound. Otherwise suppressed (`retry_deadline`). |
 | Notification service: permanent error | Error class | Dead-lettered at once with the reason. Retrying cannot help. | Fix the cause, then replay. |
 
 **Retry policy.** Delay doubles from 1 second to a 5-minute cap. Jitter picks a
@@ -295,21 +295,24 @@ they end differently:
 - The next attempt would land past `DueAt + MaxLateness`: the reminder is
   **suppressed** with reason `retry_deadline` and journalled. It is counted
   with suppressed-stale.
-- `MaxAttempts` (10) is reached while still inside the bound: the reminder is
-  **dead-lettered** with the reason.
+- `MaxAttempts` (20) is reached while still inside the bound: the reminder is
+  **dead-lettered** with the reason. The cap is a safety valve against a
+  misconfigured backoff or a tight retry loop, not the intended limit.
 
 The DLQ only holds items a human can fix in time; lateness is a metric, not a
 ticket. A reminder past its bound cannot be rescued by anyone, so it never
-enters the queue.
+enters the queue. Dead letters are therefore permanent errors, or the safety
+valve tripping.
 
 With the defaults (1 second doubling to a 5-minute cap, jitter in the upper
-half) ten attempts span roughly 4 to 8.5 minutes (nine waits, 511 seconds
-before jitter, 50 to 100% of that after it), so the attempt cap binds before
-the staleness bound does. An outage longer than that dead-letters the reminder
-with minutes of the bound to spare, which is when an operator can still act.
-Raising `MaxAttempts` to about 20 makes the deadline the limit instead. An
-outage of the order service or notification service shorter than the budget
-recovers with no dead letter at all.
+half) twenty attempts span 3,511 seconds before jitter and 50 to 100% of that
+after it: about 29 to 58 minutes. That reaches the 30-minute bound for all but
+the lowest jitter draws, so under the defaults the bound is the limit. A
+transient outage of the order service or the notification service that ends
+within the bound recovers on its own, with no dead letter and no operator. One
+that outlasts the bound ends in `retry_deadline` suppressions, visible as a
+metric. If `BackoffMax` or `MaxLateness` is changed, `MaxAttempts` must be
+rechecked against this span, or the cap will start to bind first.
 
 **Head-of-line blocking in the scheduler.** In this single-process version the
 scheduler fires timers in due order and holds the queue behind a timer whose

@@ -18,9 +18,11 @@ type Config struct {
 	// within this long of its due time is suppressed, not sent late.
 	MaxLateness time.Duration
 
-	// MaxAttempts caps delivery attempts per reminder before it is
-	// dead-lettered. Retries also stop, whichever comes first, when the next
-	// attempt would fall past DueAt + MaxLateness.
+	// MaxAttempts is a safety valve: delivery attempts per reminder before it
+	// is dead-lettered. The intended limit is the staleness bound: retries
+	// stop, and the reminder is suppressed, when the next attempt would fall
+	// past DueAt + MaxLateness. Keep this high enough that the bound comes
+	// first (about 29 to 58 minutes of retries at the default backoff).
 	MaxAttempts int
 	// BackoffBase and BackoffMax bound the exponential retry delay.
 	BackoffBase time.Duration
@@ -41,7 +43,7 @@ func Default() Config {
 		Window:      30 * time.Minute,
 		Offsets:     []time.Duration{30 * time.Minute, time.Hour, 24 * time.Hour},
 		MaxLateness: 30 * time.Minute,
-		MaxAttempts: 10,
+		MaxAttempts: 20,
 		BackoffBase: time.Second,
 		BackoffMax:  5 * time.Minute,
 		HoldoutSalt: "cart-recovery-v1",
