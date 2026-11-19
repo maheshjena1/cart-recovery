@@ -66,7 +66,9 @@ reminders, runs every pre-send check, then records `Suppressed(holdout)` instead
 of sending. Because the holdout decision is the last gate, the record means "a
 treated shopper in this exact state would have been sent this reminder", which
 gives like-for-like populations. Assignment is a salted hash of the shopper id:
-stable across carts and restarts, and needing no storage.
+stable for the same shopper id across carts and restarts, and needing no
+storage. A guest who later logs in has a different id and can switch groups
+(section 9).
 
 - **Primary:** incremental conversion, `P(order within 7 days of abandonment)`
   for treated minus holdout, and incremental revenue per abandoning shopper,
