@@ -8,6 +8,8 @@ It is a take-home case study: the detection-and-scheduling pipeline runs in
 process on a fake clock, with in-memory adapters. Nothing is sent.
 
 **Read [docs/DESIGN.md](docs/DESIGN.md) first.** It is the primary artifact.
+Supporting detail (full assumptions list, capacity estimate, benchmark numbers,
+more rejected alternatives) is in [docs/APPENDIX.md](docs/APPENDIX.md).
 
 ## Run it
 
@@ -105,7 +107,7 @@ End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
   behind it. Production uses per-shard leases and quarantines a timer after N
   consecutive failures, journalled (DESIGN §8). Not built.
 - **No load test.** The only measured number is the engine micro-benchmark.
-  Capacity figures in the design are labelled estimates.
+  Capacity figures (Appendix B) are labelled estimates.
 - **Dedupe records never expire.** Retention is specified (DESIGN §7), not
   implemented.
 - **Not built:** guest merge, frequency cap, quiet hours, message variants.
