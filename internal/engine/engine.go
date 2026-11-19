@@ -8,6 +8,7 @@ package engine
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"cartrecovery/internal/clock"
@@ -48,6 +49,10 @@ func (e *Engine) HandleEvent(ev events.Event, ingestedAt time.Time) error {
 		if !changed {
 			return nil
 		}
+		if !bindIdentity(&c, ev) {
+			slog.Warn("event carries a different user than the cart; keeping the cart's user",
+				"cart", c.ID, "event", ev.ID, "cartUser", c.UserID, "eventUser", ev.UserID)
+		}
 		// One inactivity timer per cart. If one is already armed it is left
 		// alone: when it fires it sees the newer LastActivity and re-arms.
 		if c.Status == store.Active && c.CheckDue.IsZero() {
@@ -57,6 +62,28 @@ func (e *Engine) HandleEvent(ev events.Event, ingestedAt time.Time) error {
 		tx.PutCart(c)
 		return nil
 	})
+}
+
+// bindIdentity keeps the cart's identity current as events arrive. A guest
+// cart (session id only) is upgraded to the user's id on the first event that
+// carries one, so reminders are addressed to, and the holdout is decided on,
+// the signed-in shopper. It never goes the other way. An event naming a
+// different user than the cart's is not allowed to take the cart over: the
+// original user is kept and false is returned so the caller can log it. The
+// event itself still applies; rejecting it would stall the partition.
+func bindIdentity(c *store.Cart, ev events.Event) (consistent bool) {
+	if c.SessionID == "" {
+		c.SessionID = ev.SessionID
+	}
+	switch {
+	case ev.UserID == "":
+		return true
+	case c.UserID == "":
+		c.UserID = ev.UserID // guest signed in
+		return true
+	default:
+		return c.UserID == ev.UserID
+	}
 }
 
 // transition returns the cart after ev, and false if ev does not apply.

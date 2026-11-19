@@ -225,7 +225,9 @@ in time than the last:
 3. **Before send, authoritative (relay).** The relay asks the order service
    whether the cart was purchased. This catches the purchase whose event is
    still in flight. If the order service cannot answer, the relay does not
-   send: it retries later (fail closed).
+   send: it retries later (fail closed). The clock is read again after the
+   call returns and the staleness bound is re-checked, so a slow order service
+   cannot push a send past the bound.
 
 **The residual race.** A shopper can complete a purchase after check 3 passes
 and before the message reaches them. The window is the time from the check to
@@ -341,8 +343,14 @@ the reminder is suppressed and counted, not sent stale.
 user's cart; the guest cart receives a terminal event, which bumps its
 generation and voids its reminders; the user's cart receives an item event and
 starts one fresh cycle. Discarding the guest cart throws away the most recent
-intent the shopper showed. Running both would send two sets of reminders. Not
-implemented.
+intent the shopper showed. Running both would send two sets of reminders. The
+merge itself is not implemented.
+
+If the storefront instead keeps the same cart id across login, the engine
+upgrades the cart's identity to the user id on the first event that carries one,
+so reminders are addressed to, and the holdout is decided on, the signed-in
+shopper. The upgrade is one-way: an event naming a different user is applied
+but cannot take the cart over, and the conflict is logged.
 
 **Experiment assignment: user id or session id.** User id is stable across
 devices but does not exist for guests. Session id covers guests but splits one

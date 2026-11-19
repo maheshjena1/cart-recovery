@@ -223,6 +223,50 @@ func TestDuplicateEventIsIgnored(t *testing.T) {
 	}
 }
 
+func TestCartIdentityFollowsTheShopperAcrossLogin(t *testing.T) {
+	ev := func(id string, typ events.Type, user, session string) events.Event {
+		return events.Event{ID: id, CartID: "A", UserID: user, SessionID: session, Type: typ}
+	}
+	tests := []struct {
+		name         string
+		evs          []events.Event
+		wantShopper  string
+		wantUser     string
+		wantSessions string
+	}{
+		{"guest stays a guest",
+			[]events.Event{ev("e1", events.ItemAdded, "", "s1"), ev("e2", events.ItemUpdated, "", "s1")},
+			"s1", "", "s1"},
+		{"guest signs in: reminders go to the user",
+			[]events.Event{ev("e1", events.ItemAdded, "", "s1"), ev("e2", events.CartResumed, "u1", "s1")},
+			"u1", "u1", "s1"},
+		{"user is never downgraded to a guest",
+			[]events.Event{ev("e1", events.ItemAdded, "u1", "s1"), ev("e2", events.ItemUpdated, "", "s2")},
+			"u1", "u1", "s1"},
+		{"another user cannot take the cart over",
+			[]events.Event{ev("e1", events.ItemAdded, "u1", "s1"), ev("e2", events.ItemUpdated, "u2", "s1")},
+			"u1", "u1", "s1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFixture(t)
+			for _, e := range tt.evs {
+				if err := f.eng.HandleEvent(e, f.clk.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c := f.cart()
+			if c.ShopperID() != tt.wantShopper || c.UserID != tt.wantUser || c.SessionID != tt.wantSessions {
+				t.Fatalf("shopper=%q user=%q session=%q, want %q %q %q",
+					c.ShopperID(), c.UserID, c.SessionID, tt.wantShopper, tt.wantUser, tt.wantSessions)
+			}
+			if c.Generation != uint64(len(tt.evs)) {
+				t.Fatalf("generation = %d: events with an identity conflict must still apply", c.Generation)
+			}
+		})
+	}
+}
+
 func TestTriggerKey(t *testing.T) {
 	if got := TriggerKey("cart-9", 4, 2); got != "cart-9:4:2" {
 		t.Fatalf("TriggerKey = %q, want cart-9:4:2", got)
