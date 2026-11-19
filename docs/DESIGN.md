@@ -82,7 +82,7 @@ the shopper id: stable across carts and restarts, and needing no storage.
 | Duplicate reminders | Same | 0 |
 | Unsubscribe and spam-complaint rate, treated vs holdout | Complaints damage sender reputation for all email, not just reminders | No significant rise |
 | 30- and 90-day repeat purchase rate, treated vs holdout | Annoyed shoppers churn later than the experiment window | No significant drop |
-| Share of suppressed-stale and dead-lettered reminders | The system is failing quietly | Alert above a small baseline |
+| Share of suppressed-late (`stale`, `retry_deadline`) and dead-lettered reminders | The system is failing quietly | Alert above a small baseline |
 | Margin, if reminders carry discounts | Shoppers learn to abandon on purpose | Incremental margin, not revenue, stays positive |
 
 **Experiment design.** For a two-sided test at 5% significance and 80% power,
@@ -278,8 +278,8 @@ be deduplicated against the old cycle's.
 | Engine consumer crashes | Consumer lag | That partition pauses; reminders are late | Restart resumes from the committed offset. Reprocessed events are skipped by id. |
 | Store unavailable | Transaction errors | Consumers and timer workers stall and retry. Nothing is acknowledged. | Catch up on recovery. Reminders past the staleness bound are suppressed. |
 | Timer worker crashes | Timer lag (now minus oldest due timer) | Timers fire late | Another worker claims the shard. Timers are rows, so none are lost. A re-fired timer is harmless. |
-| Order service down | Pre-send check errors | No sends (fail closed); fresh rows retry with backoff, expired rows are suppressed | Automatic if it recovers within the retry budget. Otherwise dead-lettered for replay. |
-| Notification service: transient error | Send error | Retry with exponential backoff and jitter within the retry budget | Automatic, or dead-letter when the budget runs out. |
+| Order service down | Pre-send check errors | No sends (fail closed); fresh rows retry with backoff, expired rows are suppressed | Automatic if it recovers within the retry budget. Otherwise dead-lettered at the attempt cap, or suppressed (`retry_deadline`) if the bound comes first. |
+| Notification service: transient error | Send error | Retry with exponential backoff and jitter within the retry budget | Automatic, or dead-letter at the attempt cap, or suppress (`retry_deadline`) at the bound. |
 | Notification service: permanent error | Error class | Dead-lettered at once with the reason. Retrying cannot help. | Fix the cause, then replay. |
 
 **Retry policy.** Delay doubles from 1 second to a 5-minute cap. Jitter picks a
@@ -289,17 +289,27 @@ goroutine, so it survives a restart.
 
 **Retry budget.** A reminder is worth sending until the staleness bound
 (`MaxLateness`, 30 minutes after its due time), so that, not a fixed number of
-tries, is the budget. A reminder is dead-lettered when the next attempt would
-land past `DueAt + MaxLateness`, or after `MaxAttempts` (10) attempts, whichever
-comes first. The attempt cap is a backstop against a tight loop under a
-misconfigured backoff. With the defaults (1 second doubling to a 5-minute cap,
-jitter in the upper half) ten attempts span roughly 4 to 8.5 minutes (nine waits, 511 seconds before
-jitter, 50 to 100% of that after it), so the cap
-binds before the staleness bound does. To use the whole 30 minutes, raise
-`MaxAttempts` to about 20. An outage of the order service or notification
-service shorter than that recovers without a dead letter. A longer one
-dead-letters the reminder with the reason, and a late replay is suppressed as
-stale (section 8, replay runbook).
+tries, is the budget. Retries end at whichever comes first of two limits, and
+they end differently:
+
+- The next attempt would land past `DueAt + MaxLateness`: the reminder is
+  **suppressed** with reason `retry_deadline` and journalled. It is counted
+  with suppressed-stale.
+- `MaxAttempts` (10) is reached while still inside the bound: the reminder is
+  **dead-lettered** with the reason.
+
+The DLQ only holds items a human can fix in time; lateness is a metric, not a
+ticket. A reminder past its bound cannot be rescued by anyone, so it never
+enters the queue.
+
+With the defaults (1 second doubling to a 5-minute cap, jitter in the upper
+half) ten attempts span roughly 4 to 8.5 minutes (nine waits, 511 seconds
+before jitter, 50 to 100% of that after it), so the attempt cap binds before
+the staleness bound does. An outage longer than that dead-letters the reminder
+with minutes of the bound to spare, which is when an operator can still act.
+Raising `MaxAttempts` to about 20 makes the deadline the limit instead. An
+outage of the order service or notification service shorter than the budget
+recovers with no dead letter at all.
 
 **Head-of-line blocking in the scheduler.** In this single-process version the
 scheduler fires timers in due order and holds the queue behind a timer whose
@@ -327,7 +337,8 @@ Replay never needs judgement about whether it is safe. That is what
 idempotency buys.
 
 **Operating signals.** Timer lag and consumer lag (both mean reminders are
-late); dead-letter count by reason; suppressed-stale rate; and the SLO
+late); dead-letter count by reason; suppressed-late rate (`stale` plus
+`retry_deadline`); and the SLO
 "99% of reminders handed to the notification service within 60 seconds of
 their due time" (a proposed target, to be set from production data).
 

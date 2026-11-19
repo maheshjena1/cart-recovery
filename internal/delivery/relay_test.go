@@ -3,7 +3,6 @@ package delivery
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -140,6 +139,8 @@ func TestAttemptCapDeadLetters(t *testing.T) {
 		f.clk.Advance(time.Minute)
 	}
 
+	// The cap is reached 3 minutes in, well inside the 30-minute bound: a
+	// person can still fix this in time, so it is a dead letter.
 	f.wantStatus(t, store.Dead, "gave up after 3 attempts: transient failure")
 	if got := f.n.Attempts(); got != 3 {
 		t.Fatalf("notifier called %d times, want 3", got)
@@ -217,25 +218,29 @@ func TestRetriesStopAtTheStalenessBound(t *testing.T) {
 	f := newFixture(cfg)
 	f.orderServiceDownFor(t, 40*time.Minute)
 
+	// Lateness is a metric, not a ticket: suppressed and journalled, and
+	// nothing for an operator to replay.
+	f.wantStatus(t, store.Suppressed, "retry_deadline")
 	tr, _ := f.st.Trigger(key)
-	if tr.Status != store.Dead || !strings.Contains(tr.Reason, "staleness bound") {
-		t.Fatalf("trigger is %s (%q), want DEAD at the staleness bound", tr.Status, tr.Reason)
-	}
 	if tr.Attempts <= 5 {
 		t.Fatalf("gave up after %d attempts; the bound, not the attempt cap, should decide, and later than this", tr.Attempts)
 	}
 	if last := tr.NextAttempt; last.After(t0.Add(cfg.MaxLateness)) {
 		t.Fatalf("scheduled an attempt at +%v, past the bound", last.Sub(t0))
 	}
+	if dlq := f.st.DeadLetters(); len(dlq) != 0 {
+		t.Fatalf("dead-letter queue = %+v, want empty", dlq)
+	}
 	if f.n.Attempts() != 0 {
 		t.Fatal("sent while the order service was down")
 	}
-
-	// Replayed now, past the bound, it is suppressed, never sent.
-	if err := f.relay.Replay(key); err != nil {
-		t.Fatal(err)
+	if err := f.relay.Replay(key); err == nil {
+		t.Fatal("a suppressed reminder was accepted for replay")
 	}
-	f.wantStatus(t, store.Suppressed, "stale")
+	journal := f.st.Journal()
+	if last := journal[len(journal)-1]; last.Kind != store.KindSuppressed || last.Detail != "retry_deadline" {
+		t.Fatalf("last journal entry = %v, want Suppressed(retry_deadline)", last)
+	}
 }
 
 func TestPreSendChecks(t *testing.T) {

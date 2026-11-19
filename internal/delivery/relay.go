@@ -125,10 +125,12 @@ func (r *Relay) deliver(tr store.Trigger) error {
 	}
 }
 
-// retry schedules another attempt. It dead-letters the trigger when the
-// attempt cap is reached, or when the next attempt would land past the
-// staleness bound: such an attempt would be suppressed as stale anyway, so
-// the reminder is surfaced for an operator now rather than at the bound.
+// retry schedules another attempt. Two things end the retries, and they end
+// differently. Reaching the attempt cap dead-lettered the trigger: something
+// keeps failing and a person can still fix it in time. A next attempt that
+// would land past the staleness bound suppresses it ("retry_deadline"): no
+// person can make a late reminder worth sending, so it is a metric, not a
+// ticket, and it stays out of the dead-letter queue.
 func (r *Relay) retry(tr store.Trigger, now time.Time, cause error) error {
 	tr.Attempts++
 	if tr.Attempts >= r.cfg.MaxAttempts {
@@ -136,7 +138,7 @@ func (r *Relay) retry(tr store.Trigger, now time.Time, cause error) error {
 	}
 	next := now.Add(Backoff(tr.Attempts, r.cfg.BackoffBase, r.cfg.BackoffMax, r.jitter()))
 	if next.After(tr.DueAt.Add(r.cfg.MaxLateness)) {
-		return r.finish(tr, now, store.Dead, fmt.Sprintf("next retry would pass the staleness bound after %d attempts: %v", tr.Attempts, cause))
+		return r.finish(tr, now, store.Suppressed, "retry_deadline")
 	}
 	tr.NextAttempt = next
 	return r.st.Update(func(tx *store.Tx) error {
