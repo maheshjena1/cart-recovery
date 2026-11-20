@@ -29,14 +29,18 @@ Four decisions carry the design:
 4. **Delay, never drop, under load**, with lateness bounded: a reminder too late
    to be useful is suppressed and recorded, not sent.
 
+Four other architectures were considered (batch scan, delayed message per event,
+Redis timers, stream-processor windows). Section 11 compares them against the
+numbers that decided the choice.
+
 The repository implements this pipeline in process, on in-memory adapters, with
 a fake clock. It does not send anything. What is built and what is only
 designed is stated in the README's known limitations and in section 12.
 
 ## 2. Assumptions and clarifying questions
 
-The six assumptions that change the design most. Each is a question I would ask;
-the full list, with what changes if the answer differs, is in
+The six assumptions that change the design most. Each is an open question with
+the default the design builds on; the full list, with what changes if the answer differs, is in
 [Appendix A](APPENDIX.md#a-assumptions-and-clarifying-questions).
 
 - **Offsets are measured from abandonment**, not from last activity. The first
@@ -56,7 +60,7 @@ the full list, with what changes if the answer differs, is in
 - **Inactivity runs on server ingest time**, not the client's `occurredAt`.
   That makes replay deterministic and avoids a clock-skew rule.
 
-## 3. Success and guardrail metrics (requirement 1)
+## 3. Success and guardrail metrics
 
 **What success means.** Not "recovered carts". Many shoppers come back on their
 own, so counting purchases after a reminder credits the system with sales it did
@@ -183,7 +187,7 @@ sequenceDiagram
   R->>S: tx: row SENT
 ```
 
-## 5. Detection: event-driven, not batch (requirement 2)
+## 5. Detection: event-driven, not batch
 
 | | Event-driven (chosen) | Periodic batch scan |
 |---|---|---|
@@ -202,7 +206,7 @@ the cart was edited since, it re-arms for `lastActivity + window`; otherwise the
 cart is abandoned. Timer writes scale with carts, not events, and detection is
 still exact to the timer's resolution.
 
-## 6. Mid-flight cancellation (requirement 3)
+## 6. Mid-flight cancellation
 
 Reminders are cancelled by making them irrelevant. Three checks, each narrower
 in time than the last:
@@ -231,10 +235,9 @@ and before the message reaches them: the time from the check to the provider's
 handoff, milliseconds to a few seconds. It cannot reach zero, because an email
 cannot be recalled. It could be narrowed by repeating the check at render time
 in the notification service, and softened with copy ("already ordered? ignore
-this"). I would measure "reminders sent for purchased carts" before spending
-more on it.
+this"). Measure "reminders sent for purchased carts" before spending more on it.
 
-## 7. Idempotency and delivery (requirement 4)
+## 7. Idempotency and delivery
 
 Every hop is at-least-once, so every hop has a key.
 
@@ -250,7 +253,7 @@ with timers in Redis and state elsewhere, a crash between the two writes loses a
 timer or leaves an orphan.
 
 The last hop crosses a system boundary, so it cannot be atomic. It is
-at-least-once plus an idempotent receiver. That is the honest meaning of
+at-least-once plus an idempotent receiver. That is the precise meaning of
 "effectively once" here, and it depends on the notification service honouring
 the key. Several relays may drain the same outbox: in production each claims a
 row first (a lease, or `SELECT ... FOR UPDATE SKIP LOCKED`) so the provider is
@@ -263,7 +266,7 @@ at least the log's retention (the replay horizon); outbox rows and the
 notification service's key memory longer than the largest offset (24 hours) plus
 that horizon. The in-memory store keeps everything; expiry is not implemented.
 
-## 8. Failure handling (requirement 5)
+## 8. Failure handling
 
 | What fails | Detected by | Effect | Recovery |
 |---|---|---|---|
@@ -369,9 +372,65 @@ peak, which is why it is partitioned by cart id. The capacity estimate and the
 one benchmark (engine CPU cost only, not production throughput) are in
 [Appendix B](APPENDIX.md#b-capacity-estimate-and-benchmark).
 
-## 11. Decisions and rejected alternatives
+## 11. Options considered and why this one
 
-The decisions a reviewer is most likely to probe. More are in
+### 11.1 The numbers that decided it
+
+These come from the stated load or follow from it. The derived ones are estimates, not
+measurements; the inputs are in [Appendix B](APPENDIX.md#b-capacity-estimate-and-benchmark).
+
+| Parameter | Value | What it rules out |
+|---|---|---|
+| Peak event rate | 5,000/s, spikes above | Anything that does one extra write or scan per event on a single node |
+| Carts waiting out the 30-minute window | About 1.5 million at sustained peak (5,000/s ÷ 6 events per cart ≈ 830 new carts/s × 1,800 s) | Per-cart sleeping threads or in-process timers held in memory |
+| Longest reminder delay | 24 hours | Delay queues with a short maximum (SQS caps a message delay at 15 minutes) and anything that loses timers on restart |
+| Lateness tolerated | Minutes (suppress after 30 minutes past due) | Nothing. Lateness is a tuning knob, which is why batch stays a real contender |
+| Wrong-reminder tolerance | Zero for purchased carts | Any design that cancels by racing a delete against a firing timer |
+| Reminder timer creation rate | About 1,750/s at peak (70% abandonment × 3 offsets × 830 carts/s), most waiting 24 hours | A timer design that cannot be queried, drained or inspected |
+| Store write budget | About 5,000 transactions/s at peak | A design that adds a second transaction per event to a second system |
+
+### 11.2 Architectures compared
+
+Five designs could meet the requirements. They are compared against the
+numbers above.
+
+| | A. Periodic batch scan | B. Delayed message per event | C. Redis timers, state in a DB | D. Stream processor with session windows | **E. Chosen: log, single writer, timer table, outbox** |
+|---|---|---|---|---|---|
+| How it detects idle | A job queries carts with `lastActivity` older than 30 min | Each event enqueues a "check in 30 min" message | Each event sets a Redis sorted-set entry scored by due time | Session window with a 30-minute gap closes on idle | One durable timer per cart, re-armed on fire if the cart was edited |
+| Lateness | Up to one scan interval, fixed by the schedule | Seconds | Seconds | Window closes on stream time; a quiet partition can hold a close until the next event | Seconds, plus consumer lag under a spike |
+| Edit resets the clock | Racy without a generation check | One stale message per event, so about 6 per cart, each needing a check. Timer volume scales with events: 5,000/s, not 830/s | Overwrite the entry; the write goes to two systems | Native | Exact, one writer orders edit and timer |
+| 24-hour reminders | Easy (a column) | Awkward: needs chaining or a store, since delay maxima are short | Fine | Large window state held for a day | Fine: timers are rows |
+| Cancel on purchase | Re-read state at send; simple | Cannot delete a queued message; needs a state lookup anyway | Delete a key, racing the worker that popped it | State lookup in the processor | Generation check at fire and send |
+| Crash consistency | One store, so good | Message and state are two systems | A crash between the Redis write and the state write loses or orphans a timer | Checkpointed; good inside the engine, but the send is outside | One transaction for state, timer, outbox, dedupe key |
+| Operating cost | Lowest: one job, one table | Low to medium | Medium: a second stateful system | Highest: a cluster, state backend, upgrade story | Medium: a log, a store and two small workers |
+| Fits when | Volume is low or reminders can be minutes late | Short, uniform delays | The timer needs sub-second precision | The team already runs the platform | Volume is high, correctness is strict and delays are long |
+
+**Why not A, the strongest runner-up.** With an index on `(status, lastActivity)`
+a scan reads only due carts, so scan cost is not the objection. The objections
+are that every edit rewrites an index entry (about 5,000 index writes/s, the
+same cost the chosen design pays on the cart row), that lateness equals the scan
+interval, and that the edit-versus-scan race needs the generation check anyway.
+At a 1-minute scan, lateness is about 3% of the 30-minute window, which is
+acceptable. At 100 events/s A would be the right choice. At 5,000/s A does not
+fail. E is chosen because it gets exact behaviour from parts the 24-hour
+reminders need regardless: a timer table and an outbox.
+
+**Why not B.** Timer volume scales with events, not carts: about 6 times the
+messages of E, nearly all of which find a newer activity time and do nothing.
+
+**Why not C.** The deciding fact is the store write budget. Redis plus a state
+store means two systems that cannot commit together, so crash recovery needs a
+reconciliation job. A durable timer table in the same store removes that class
+of bug for the price of a polling query.
+
+**Why not D.** A strong fit for the detection step, and the one to revisit
+if the organisation already ran Flink or Kafka Streams. It does not remove the
+outbox, the order-service check or the retry policy, so it replaces one box
+rather than the design, and adds the heaviest operational footprint.
+
+### 11.3 Choices inside the chosen design
+
+Smaller decisions with their rejected alternatives. More are in
 [Appendix C](APPENDIX.md#c-more-rejected-alternatives).
 
 | Decision | Rejected | Why |
@@ -383,7 +442,7 @@ The decisions a reviewer is most likely to probe. More are in
 | Outbox plus idempotent receiver | Send inside the engine transaction | A slow send would hold the partition; a crash would lose or repeat it |
 | Delay under load, bounded by staleness | Drop or sample events | A dropped purchase event becomes a wrong reminder |
 
-## 12. With more time
+## 12. Next steps
 
 - A Postgres adapter behind the store's method set, running the same scenario
   suite. That is the real test of the transactional claims.

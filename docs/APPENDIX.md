@@ -1,11 +1,11 @@
 # Appendix
 
-Detail that supports [DESIGN.md](DESIGN.md). Read it when probing a specific
-assumption, number or rejected alternative; the design stands without it.
+Detail that supports [DESIGN.md](DESIGN.md): the full assumptions list, capacity
+numbers and further rejected alternatives. The design stands without it.
 
 ## A. Assumptions and clarifying questions
 
-Each row is a question I would ask, the default I built on, and what changes if
+Each row is an open question, the default the design builds on, and what changes if
 the answer differs. DESIGN section 2 lists the six that change the design most.
 
 | Question | Assumed default | If wrong |
@@ -32,7 +32,7 @@ the answer differs. DESIGN section 2 lists the six that change the design most.
 - Store: one transaction per event, so 5,000 transactions/s at peak. This is
   the bottleneck and the reason to partition the store by cart id.
 - Partitions: if one consumer sustains 1,000 to 2,000 transactions/s against
-  the store (to be load-tested), peak needs 3 to 5. I would provision 64 for
+  the store (to be load-tested), peak needs 3 to 5. Provision 64 for
   spike headroom and fine-grained rebalancing.
 - Timers: assuming 6 events per cart and 70% abandonment, peak is about 830
   inactivity timers/s and 1,750 reminder timers/s.
@@ -50,7 +50,7 @@ point, `h = 10%`, the formula in section 3 gives about 78,400 shoppers; at
 
 ## C. More rejected alternatives
 
-DESIGN section 11 has the decisions a reviewer is most likely to probe. These
+DESIGN section 11 has the main alternatives and the smaller decisions. These
 are the rest.
 
 | Decision | Rejected | Why |

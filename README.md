@@ -4,10 +4,11 @@ A cart is abandoned when a shopper edits it and then goes quiet for 30 minutes.
 This pipeline detects that, schedules reminders 30 minutes, 1 hour and 24 hours
 later, and stops the moment the cart is purchased, cleared or resumed.
 
-It is a take-home case study: the detection-and-scheduling pipeline runs in
-process on a fake clock, with in-memory adapters. Nothing is sent.
+The detection-and-scheduling pipeline runs in process on a fake clock, with
+in-memory adapters. Nothing is sent.
 
-**Read [docs/DESIGN.md](docs/DESIGN.md) first.** It is the primary artifact.
+**Read [docs/DESIGN.md](docs/DESIGN.md) first.** It covers the design, the
+alternatives considered and the failure behaviour.
 Supporting detail (full assumptions list, capacity estimate, benchmark numbers,
 more rejected alternatives) is in [docs/APPENDIX.md](docs/APPENDIX.md).
 
@@ -78,17 +79,17 @@ Ingest -> log -> engine -> store <- scheduler
 - **Delay, not drop, under load**, bounded by a staleness limit past which a
   reminder is suppressed and recorded.
 
-## Requirement traceability
+## Design traceability
 
-| Requirement | Design | Strongest tests |
+| Area | Design | Strongest tests |
 |---|---|---|
-| 1. Success and guardrail metrics, control group | [§3](docs/DESIGN.md#3-success-and-guardrail-metrics-requirement-1) | `TestHoldoutIsRecordedButNotSent`, `TestInHoldoutSplit` |
-| 2. Detection: event-driven or batch | [§5](docs/DESIGN.md#5-detection-event-driven-not-batch-requirement-2) | `TestHappyPathThreeReminders`, `TestEditResetsTheClock`, `TestTransitions` |
-| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation-requirement-3) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestCartChangeDuringTheOrderCheckCancelsTheSend` |
-| 4. Idempotency, no duplicate reminders | [§7](docs/DESIGN.md#7-idempotency-and-delivery-requirement-4) | `TestDuplicateEventDeliveryHasNoEffect`, `TestRestartAndLogReplaySendNothingTwice`, `TestTwoRelaysSendingTheSameRowAreDeduplicatedByKey` |
-| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling-requirement-5) | `TestSendFailuresRetryDeadLetterAndReplay`, `TestRetriesStopAtTheStalenessBound`, `TestFailureOnTheCapAttemptIsDeadLetteredInsideTheBoundAndSuppressedAfter` |
+| 1. Success and guardrail metrics, control group | [§3](docs/DESIGN.md#3-success-and-guardrail-metrics) | `TestHoldoutIsRecordedButNotSent`, `TestInHoldoutSplit` |
+| 2. Detection: event-driven or batch | [§5](docs/DESIGN.md#5-detection-event-driven-not-batch) | `TestHappyPathThreeReminders`, `TestEditResetsTheClock`, `TestTransitions` |
+| 3. Mid-flight cancellation | [§6](docs/DESIGN.md#6-mid-flight-cancellation) | `TestPurchaseCancelsRemainingReminders`, `TestOrderPlacedBetweenFireAndSendIsCaught`, `TestCartChangeDuringTheOrderCheckCancelsTheSend` |
+| 4. Idempotency, no duplicate reminders | [§7](docs/DESIGN.md#7-idempotency-and-delivery) | `TestDuplicateEventDeliveryHasNoEffect`, `TestRestartAndLogReplaySendNothingTwice`, `TestTwoRelaysSendingTheSameRowAreDeduplicatedByKey` |
+| 5. Failure handling: retry, dead-letter, replay | [§8](docs/DESIGN.md#8-failure-handling) | `TestSendFailuresRetryDeadLetterAndReplay`, `TestRetriesStopAtTheStalenessBound`, `TestFailureOnTheCapAttemptIsDeadLetteredInsideTheBoundAndSuppressedAfter` |
 
-Two or three tests per requirement, the ones that carry it. The rest are named
+Two or three tests per area, the ones that carry it. The rest are named
 for what they check; list them all with `go test ./... -list .`.
 
 End-to-end tests are in `test/e2e`; the rest sit beside the package they test.
